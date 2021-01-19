@@ -90,8 +90,8 @@ class APNsClient(object):
     def send_notification(self, token_hex: str, notification: Payload, topic: Optional[str] = None,
                           priority: NotificationPriority = NotificationPriority.Immediate,
                           expiration: Optional[int] = None, collapse_id: Optional[str] = None) -> None:
-        stream_id = self.send_notification_async(token_hex, notification, topic, priority, expiration, collapse_id)
-        result = self.get_notification_result(stream_id)
+        stream = self.send_notification_async(token_hex, notification, topic, priority, expiration, collapse_id)
+        result = self.get_notification_result(stream)
         if result != 'Success':
             if isinstance(result, tuple):
                 reason, info = result
@@ -146,21 +146,22 @@ class APNsClient(object):
             headers['apns-collapse-id'] = collapse_id
 
         url = '/3/device/{}'.format(token_hex)
-        stream_id = self._connection.request('POST', url, json_payload, headers)  # type: int
-        return stream_id
+        # stream_id = self._connection.request('POST', url, json_payload, headers)  # type: int
+        stream = self._connection.stream('POST', url, data=json_payload, headers=headers)
+        return stream
 
     def get_notification_result(self, stream_id: int) -> Union[str, Tuple[str, str]]:
         """
         Get result for specified stream
         The function returns: 'Success' or 'failure reason' or ('Unregistered', timestamp)
         """
-        with self._connection.get_response(stream_id) as response:
-            if response.status == 200:
+        with stream_id as response:
+            if response.status_code == 200:
                 return 'Success'
             else:
                 raw_data = response.read().decode('utf-8')
                 data = json.loads(raw_data)  # type: Dict[str, str]
-                if response.status == 410:
+                if response.status_code == 410:
                     return data['reason'], data['timestamp']
                 else:
                     return data['reason']
@@ -186,7 +187,7 @@ class APNsClient(object):
         next_notification = next(notification_iterator, None)
         # Make sure we're connected to APNs, so that we receive and process the server's SETTINGS
         # frame before starting to send notifications.
-        self.connect()
+        # self.connect()
 
         results = {}
         open_streams = collections.deque()  # type: typing.Deque[RequestStream]
@@ -199,9 +200,9 @@ class APNsClient(object):
             self.update_max_concurrent_streams()
             if next_notification is not None and len(open_streams) < self.__max_concurrent_streams:
                 logger.info('Sending to token %s', next_notification.token)
-                stream_id = self.send_notification_async(next_notification.token, next_notification.payload, topic,
+                stream = self.send_notification_async(next_notification.token, next_notification.payload, topic,
                                                          priority, expiration, collapse_id, push_type)
-                open_streams.append(RequestStream(stream_id, next_notification.token))
+                open_streams.append(RequestStream(stream, next_notification.token))
 
                 next_notification = next(notification_iterator, None)
                 if next_notification is None:
@@ -223,8 +224,8 @@ class APNsClient(object):
         # The max_concurrent_streams value is saved in the H2Connection instance that must be
         # accessed using a with statement in order to acquire a lock.
         # pylint: disable=protected-access
-        with self._connection._conn as connection:
-            max_concurrent_streams = connection.remote_settings.max_concurrent_streams
+        with self._connection._transport as connection:
+            max_concurrent_streams = connection._max_connections
 
         if max_concurrent_streams == self.__previous_server_max_concurrent_streams:
             # The server hasn't issued an updated SETTINGS frame.
